@@ -1,65 +1,107 @@
-"""TAREFA DO ALUNO -- os cinco testes que faltam para os >= 8 do entregavel.
-
-Cada teste abaixo tem nome, docstring e um pytest.skip. Apague o skip, escreva o
-corpo, e o teste passa a valer. Nenhum deles precisa de banco: os tres primeiros
-rodam so contra o motor.
-"""
+"""TAREFA DO ALUNO -- os cinco testes que faltam para os >= 8 do entregavel."""
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 
-import pytest
+from app.dominio.motor_emergia import calcular_indices
 
 
 def test_regressao_numerica_contra_a_planilha(fluxos_golden):
-    """Compara os seis indices com a aba SSB da Planilha_base.xlsx.
+    """Compara os seis indices com os valores esperados do inventario de referencia."""
+    resultado = calcular_indices(fluxos_golden, Decimal("1000"))
+    esperados = {
+        "y": Decimal("200.000000"),
+        "eyr": Decimal("4.000000"),
+        "elr": Decimal("0.739130"),
+        "esi": Decimal("5.411765"),
+        "eii": Decimal("0.184783"),
+        "percentual_r": Decimal("57.500000"),
+    }
 
-    Criterio do entregavel: abs(delta) <= 1E-6 por indice. Comece pelo inventario
-    de referencia (Y = 200, F = 50, renovaveis = 115, nao renovaveis = 85) e
-    escreva os seis valores esperados a mao antes de rodar -- se o teste passar
-    de primeira sem voce saber o valor esperado, ele nao esta provando nada.
-    """
-    pytest.skip("TODO PASSO 5: escrever a regressao numerica")
+    tolerancia = Decimal("1E-6")
+    for campo, esperado in esperados.items():
+        obtido = getattr(resultado, campo)
+        assert abs(obtido - esperado) <= tolerancia
 
 
 def test_quantizacao_unica_no_final():
-    """Mostra o erro duplo de arredondar no meio do calculo.
+    """Arredondar EYR e ELR antes da divisao altera o ESI final."""
+    seis_casas = Decimal("1E-6")
 
-    Calcule ESI = EYR / ELR de duas formas: (a) quantizando EYR e ELR para seis
-    casas antes de dividir; (b) dividindo em 28 digitos e quantizando so o ESI.
-    Os dois resultados diferem -- e o motor usa (b). Prove a diferenca.
-    """
-    pytest.skip("TODO PASSO 5: provar o erro duplo do arredondamento intermediario")
+    with localcontext() as ctx:
+        ctx.prec = 28
+        ctx.rounding = ROUND_HALF_EVEN
+
+        eyr = Decimal("200") / Decimal("50")
+        elr = Decimal("85") / Decimal("115")
+
+        arredondando_no_meio = (
+            eyr.quantize(seis_casas) / elr.quantize(seis_casas)
+        ).quantize(seis_casas)
+        arredondando_so_no_final = (eyr / elr).quantize(seis_casas)
+
+    assert arredondando_no_meio == Decimal("5.411768")
+    assert arredondando_so_no_final == Decimal("5.411765")
+    assert arredondando_no_meio != arredondando_so_no_final
 
 
 def test_ordem_da_soma_com_magnitudes_divergentes():
-    """A associatividade quebra quando as magnitudes divergem.
+    """Documenta o limite de 28 digitos para somas de magnitudes muito diferentes."""
+    with localcontext() as ctx:
+        ctx.prec = 28
+        ctx.rounding = ROUND_HALF_EVEN
 
-    Monte um inventario com um fluxo de 1E20 sej e outro de 1E-5 sej e some nas
-    duas ordens possiveis. Explique, no corpo do teste, por que a precisao de 28
-    digitos e o limite -- e por que ordenar o inventario e uma decisao de dominio.
-    """
-    pytest.skip("TODO PASSO 5: exercitar o limite de precisao")
+        grande = Decimal("1E20")
+        pequeno = Decimal("1E-5")
+
+        # Em 1E20, 28 digitos ainda preservam 1E-5; com dois operandos a soma
+        # e comutativa e as duas ordens produzem exatamente o mesmo valor.
+        assert grande + pequeno == pequeno + grande
+        assert grande + pequeno == Decimal("100000000000000000000.00001")
+
+        # O limite aparece abaixo de 1E-7 nessa magnitude. Somar parcelas de
+        # 1E-8 uma a uma ao numero grande perde cada parcela por arredondamento;
+        # agrupa-las primeiro acumula 1E-7, que ja e representavel.
+        parcelas = [Decimal("1E-8")] * 10
+        uma_a_uma = grande
+        for parcela in parcelas:
+            uma_a_uma += parcela
+
+        agrupadas_primeiro = grande + sum(parcelas, Decimal(0))
+
+    assert uma_a_uma == grande
+    assert agrupadas_primeiro == Decimal("100000000000000000000.0000001")
+    assert uma_a_uma != agrupadas_primeiro
 
 
 def test_erro_de_dominio_responde_problem_json(cliente, corpo_golden):
-    """Inventario sem fluxo renovavel deve sair 422 em application/problem+json.
+    """Inventario sem fluxo renovavel deve sair como erro de dominio HTTP 422."""
+    corpo_golden["fluxos"] = [
+        {"recurso": "solo", "categoria": "N", "emergia_sej": "50"},
+        {"recurso": "diesel", "categoria": "MN", "emergia_sej": "20"},
+    ]
 
-    Hoje sai 500, porque o handler de FluxosInsuficientes nao existe -- note que
-    o 404 e o 422 do framework JA saem no formato certo, pelos handlers do
-    esqueleto: o que falta e so o erro de dominio. Feche o TODO PASSO 3 em
-    app/main.py e depois assegure aqui: status 422, header content-type
-    application/problem+json e os cinco campos da RFC 9457.
-    """
-    pytest.skip("TODO PASSO 3 + 5: handler de FluxosInsuficientes e este teste")
+    r = cliente.post("/v1/safras/42/calculos", json=corpo_golden)
+
+    assert r.status_code == 422
+    assert r.headers["content-type"].startswith("application/problem+json")
+    corpo = r.json()
+    for campo in ("type", "title", "status", "detail", "instance"):
+        assert campo in corpo
+    assert corpo["status"] == 422
+    assert corpo["type"].endswith("/fluxos-insuficientes")
 
 
 def test_campo_extra_no_corpo_da_requisicao_e_rejeitado(cliente, corpo_golden):
-    """"energia_produto_jj" tem de morrer com 422, nao virar calculo incompleto.
+    """Campo desconhecido no DTO principal deve ser rejeitado com 422."""
+    corpo_golden["energia_produto_jj"] = "1000"
 
-    Hoje o CalculoRequestDTO nao declara extra="forbid": o campo desconhecido e
-    ignorado e o typo passa silencioso, exatamente como na planilha. Feche o
-    TODO PASSO 3 em app/api/v1/dto.py e prove aqui.
-    """
-    pytest.skip("TODO PASSO 3 + 5: extra=forbid no CalculoRequestDTO e este teste")
+    r = cliente.post("/v1/safras/42/calculos", json=corpo_golden)
+
+    assert r.status_code == 422
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert any(
+        erro["campo"].endswith("energia_produto_jj")
+        for erro in r.json().get("erros", [])
+    )
